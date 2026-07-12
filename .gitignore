@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+data_lake/bronze/**/*.jsonl
+data_lake/bronze/**/*.parquet
+data_lake/silver/**/*.parquet
+data_lake/gold/*.db
+.archivos_procesados.txt

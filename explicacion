@@ -1,0 +1,24 @@
+primero se difinio una arquitectura se decidio por medallion 
+es una arquitecturaque procesa datos por capas (bronze-silver-gold)
+la idea central de esta arquitectura es nunca tocar el dato original 
+y solo refinarlo por capas 
+fuentye- bronze - silver - gold - dashboard
+bronze literal es el dato tal cual llega no se toca ni nada e como un respaldo
+silver aca aplicai la limpieza, validaciones, normalizacion etc
+gold el dato final ya agregado y estructurado listo pa los graficoa
+    QUE SE OCUPO ACA 
+fastapi: framework para la api
+render: lit hosting
+postgresql: base de datos
+sqlalvhemy: libreria para hablar con lña bd
+pandas: manipulacion de datos
+streamlit: framework de graficos
+    ARCHIVOS
+bd/schema la base de datos
+    1.control ejecucion: el registro de todo
+    2.taxi_trip: la tabla gold de los viajes de taxis
+    3.componet_price: la tabla gold de precios componentes
+db/db_utils.py comunicacion con la bd
+    1.init_db: lee el schema.sql y cre la tabla si no existe
+    2.log_ejecucion: escribe una fila en control_ejecucion cada que termina
+    3.proceso_ya_ejecutrado: para evitar duplicados 
