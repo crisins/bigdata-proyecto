@@ -91,10 +91,16 @@ with tab2:
         )
         st.dataframe(df, use_container_width=True)
 
+# ---------------------------------------------------------------------
+# TAB 3: Streaming - precios de componentes en tiempo real
+# ---------------------------------------------------------------------
 with tab3:
     st.subheader("Fluctuación de precios de componentes electrónicos (streaming)")
 
-    query = "SELECT component_id, price, event_timestamp FROM component_prices ORDER BY event_timestamp"
+    query = """
+        SELECT component_id, component_name, price, cantidad, monto, forma_pago, cliente, event_timestamp
+        FROM component_prices ORDER BY event_timestamp
+    """
     with engine.begin() as conn:
         df = pd.read_sql(text(query), conn)
 
@@ -102,14 +108,55 @@ with tab3:
         st.info("Aún no han llegado eventos streaming. Corre transform/transform_streaming.py tras recibir datos en la API.")
     else:
         df["event_timestamp"] = pd.to_datetime(df["event_timestamp"])
+        df["etiqueta"] = df["component_name"].fillna(df["component_id"])
+
         st.plotly_chart(
-            px.line(df, x="event_timestamp", y="price", color="component_id", markers=True,
-                    title="Evolución de precio por componente"),
+            px.line(df, x="event_timestamp", y="price", color="etiqueta", markers=True,
+                    title="Evolución de precio por producto",
+                    labels={"etiqueta": "Producto", "event_timestamp": "Fecha/hora", "price": "Precio"}),
             use_container_width=True,
         )
-        ultimo_precio = df.sort_values("event_timestamp").groupby("component_id").tail(1)
+        ultimo_precio = df.sort_values("event_timestamp").groupby("etiqueta").tail(1)
         st.metric("Eventos streaming procesados", len(df))
-        st.dataframe(ultimo_precio[["component_id", "price", "event_timestamp"]], use_container_width=True)
+        st.dataframe(ultimo_precio[["etiqueta", "price", "event_timestamp"]], use_container_width=True)
+
+        st.divider()
+        st.subheader("Reportes de negocio adicionales (streaming)")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if df["monto"].notna().any():
+                ingresos = df.groupby("etiqueta")["monto"].sum().reset_index().sort_values("monto", ascending=False)
+                st.plotly_chart(
+                    px.bar(ingresos, x="etiqueta", y="monto", title="Ingresos totales por producto",
+                           labels={"etiqueta": "Producto", "monto": "Monto total"}),
+                    use_container_width=True,
+                )
+            else:
+                st.info("Sin datos de 'monto' todavía.")
+
+        with col2:
+            if df["cantidad"].notna().any():
+                unidades = df.groupby("etiqueta")["cantidad"].sum().reset_index().sort_values("cantidad", ascending=False)
+                st.plotly_chart(
+                    px.bar(unidades, x="etiqueta", y="cantidad", title="Unidades transadas por producto",
+                           labels={"etiqueta": "Producto", "cantidad": "Unidades"}),
+                    use_container_width=True,
+                )
+            else:
+                st.info("Sin datos de 'cantidad' todavía.")
+
+        if df["forma_pago"].notna().any():
+            pagos = df["forma_pago"].value_counts().reset_index()
+            pagos.columns = ["forma_pago", "cantidad_eventos"]
+            st.plotly_chart(
+                px.pie(pagos, names="forma_pago", values="cantidad_eventos",
+                       title="Distribución de eventos por forma de pago"),
+                use_container_width=True,
+            )
+        else:
+            st.info("Sin datos de 'forma_pago' todavía.")
 
 
 with tab4:

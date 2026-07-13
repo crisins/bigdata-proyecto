@@ -34,11 +34,15 @@ CREATE TABLE IF NOT EXISTS taxi_trips (
 
 CREATE TABLE IF NOT EXISTS component_prices (
     id SERIAL PRIMARY KEY,
-    event_key VARCHAR(64) UNIQUE NOT NULL,  
+    event_key VARCHAR(64) UNIQUE NOT NULL,
     component_id VARCHAR(60),
     component_name VARCHAR(200),
     price DOUBLE PRECISION,
     currency VARCHAR(10),
+    cantidad INTEGER,
+    monto DOUBLE PRECISION,
+    forma_pago VARCHAR(50),
+    cliente VARCHAR(200),
     event_timestamp TIMESTAMPTZ,
     received_at TIMESTAMPTZ,
     load_ts TIMESTAMPTZ

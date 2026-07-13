@@ -46,6 +46,18 @@ def _buscar_campo(payload: dict, candidatos: list):
             return payload[nombre]
     return None
 
+def _a_entero(valor):
+    try:
+        return int(valor) if valor is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _a_float(valor):
+    try:
+        return float(valor) if valor is not None else None
+    except (TypeError, ValueError):
+        return None
 
 def _archivos_pendientes():
     todos = sorted(glob.glob(str(BRONZE_STREAMING / "dt=*" / "hour=*" / "events.jsonl")))
@@ -145,6 +157,10 @@ def _limpiar_y_transformar(registros: list):
                 ),
                 "price": price,
                 "currency": payload.get("currency", payload.get("moneda", "CLP")),
+                "cantidad": _a_entero(payload.get("cantidad")),
+                "monto": _a_float(payload.get("monto")),
+                "forma_pago": payload.get("forma_pago") or payload.get("payment_method"),
+                "cliente": payload.get("cliente") or payload.get("customer"),
                 "event_timestamp": event_ts,
                 "received_at": r.get("received_at"),
             }
