@@ -13,9 +13,8 @@ Diseño (justificación para el informe):
     ciclo bronze -> silver -> gold ocurre dentro del mismo servicio en Render.
   - Control de errores: si el payload no cumple el esquema mínimo, se
     guarda igual en una carpeta de "rechazados" con el motivo.
-  - Acepta tanto un solo evento como una LISTA de eventos.
-  - Incluye un endpoint de diagnóstico GET /api/subasta/debug para ver
-    exactamente qué payload crudo está mandando la plataforma externa.
+  - Acepta tanto un solo evento, una lista de eventos, o LISTAS ANIDADAS
+    (Duoc manda [[{...},{...}]] a veces).
 """
 import json
 import os
@@ -90,9 +89,7 @@ def health():
 def debug_ultimos_eventos():
     """
     ENDPOINT TEMPORAL DE DIAGNÓSTICO.
-    Muestra los últimos payloads CRUDOS tal cual llegaron desde Duoc,
-    sin ningún procesamiento. Sirve para confirmar qué nombres de campo
-    usa realmente la plataforma (component_id, price, etc. o distintos).
+    Muestra los últimos payloads CRUDOS tal cual llegaron desde Duoc.
     Ábrelo directo en el navegador: https://tu-url.onrender.com/api/subasta/debug
     """
     return {"cantidad_en_buffer": len(_ULTIMOS_RAW), "eventos_crudos": _ULTIMOS_RAW}
@@ -120,19 +117,27 @@ def _procesar_y_cargar_a_gold(registros_bronze: list):
         print(f"[ERROR] Falló la carga automática a Gold: {e}")
 
 
+def _aplanar_eventos(data):
+    """
+    Aplana estructuras anidadas hasta obtener una lista plana de objetos (dict).
+    Necesario porque Duoc envía a veces una LISTA DENTRO DE OTRA LISTA
+    (ej: [[{...}, {...}]] en vez de [{...}, {...}]), y no controlamos ese formato.
+    Funciona sea cual sea la profundidad de anidamiento.
+    """
+    resultado = []
+    if isinstance(data, dict):
+        resultado.append(data)
+    elif isinstance(data, list):
+        for item in data:
+            resultado.extend(_aplanar_eventos(item))
+    return resultado
+
+
 @app.post("/api/subasta/ingesta")
 async def recibir_evento(request: Request, background_tasks: BackgroundTasks):
     """
     Endpoint que se registra en https://bdrealtimeescuelait.duoc.cl
     (campo "URL", con nota "El endpoint debe ser un POST").
-
-    Acepta dos formas de payload:
-      - Un solo evento:  {"component_id": "...", "price": 123, ...}
-      - Una lista de eventos: [{"component_id": "...", ...}, {...}, ...]
-
-    Flujo: guarda crudo en Bronze (trazabilidad) y dispara en segundo
-    plano la limpieza + carga a Gold/Neon, para que quede disponible
-    en el dashboard sin pasos manuales.
     """
     event_id = str(uuid.uuid4())
     received_at = datetime.now(timezone.utc).isoformat()
@@ -143,15 +148,12 @@ async def recibir_evento(request: Request, background_tasks: BackgroundTasks):
         _guardar_rechazado(event_id, received_at, {}, f"JSON inválido: {e}")
         return JSONResponse(status_code=400, content={"status": "error", "detail": "JSON inválido"})
 
-    # Guardamos SIEMPRE el payload crudo en el buffer de diagnóstico,
-    # sin importar si luego se valida bien o mal.
+    # Guardamos SIEMPRE el payload crudo en el buffer de diagnóstico
     _ULTIMOS_RAW.append({"received_at": received_at, "raw_body": raw_body})
     del _ULTIMOS_RAW[:-_MAX_DEBUG]
 
-    if isinstance(raw_body, list):
-        eventos = raw_body
-    elif isinstance(raw_body, dict):
-        eventos = [raw_body]
+    if isinstance(raw_body, (list, dict)):
+        eventos = _aplanar_eventos(raw_body)
     else:
         _guardar_rechazado(event_id, received_at, raw_body, f"Tipo de payload no soportado: {type(raw_body).__name__}")
         return JSONResponse(status_code=400, content={"status": "error", "detail": "Payload debe ser un objeto o una lista de objetos"})
@@ -178,8 +180,6 @@ async def recibir_evento(request: Request, background_tasks: BackgroundTasks):
             _guardar_rechazado(item_event_id, received_at, item, str(e))
             procesados.append(item_event_id)
 
-    # Disparamos la limpieza + carga a Neon EN SEGUNDO PLANO, ya con la
-    # respuesta lista para Duoc (no los hacemos esperar).
     if registros_bronze:
         background_tasks.add_task(_procesar_y_cargar_a_gold, registros_bronze)
 
