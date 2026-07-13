@@ -1,4 +1,11 @@
 """
+Pipeline STREAMING - Subasta de componentes electrónicos
+============================================================
+Lee los eventos crudos que la API (api/main.py) fue dejando en la
+capa Bronze (archivos .jsonl particionados por fecha/hora), los
+limpia/valida/deduplica, y los carga al modelo final (Gold).
+
+Uso manual (además de la carga automática que hace la API):
     python transform/transform_streaming.py
 """
 import glob
@@ -18,6 +25,28 @@ BRONZE_STREAMING = BASE_DIR / "data_lake" / "bronze" / "streaming"
 SILVER_STREAMING = BASE_DIR / "data_lake" / "silver" / "streaming"
 PROCESADOS_LOG = BASE_DIR / "data_lake" / "bronze" / ".archivos_procesados.txt"
 SILVER_STREAMING.mkdir(parents=True, exist_ok=True)
+
+# Posibles nombres de campo que distintas fuentes usan para el identificador
+# del componente y para el precio. Se prueba cada uno en orden hasta encontrar
+# uno con valor. Si la plataforma usa un nombre que no está en esta lista,
+# usar GET /api/subasta/debug en la API para ver el JSON real y agregarlo aquí.
+CAMPOS_ID_POSIBLES = [
+    "component_id", "id", "componentId", "component_name", "nombre", "name",
+    "codigo", "code", "sku", "producto", "product", "product_id", "item",
+    "item_id", "componente",
+]
+CAMPOS_PRECIO_POSIBLES = [
+    "price", "precio", "valor", "value", "monto", "amount", "current_price",
+    "precio_actual", "cost", "costo", "bid", "oferta", "importe",
+]
+
+
+def _buscar_campo(payload: dict, candidatos: list):
+    """Prueba una lista de nombres de campo posibles y devuelve el primero que exista."""
+    for nombre in candidatos:
+        if nombre in payload and payload[nombre] not in (None, ""):
+            return payload[nombre]
+    return None
 
 
 def _archivos_pendientes():
@@ -81,38 +110,64 @@ def run():
 def _limpiar_y_transformar(registros: list):
     filas = []
     rechazados = 0
+    motivos_rechazo = []
 
     for r in registros:
         payload = r.get("payload", {})
         try:
-            component_id = payload.get("component_id") or payload.get("id")
-            price = payload.get("price") or payload.get("precio")
+            # --- VALIDACIÓN: campos mínimos obligatorios (nombre flexible) ---
+            component_id = _buscar_campo(payload, CAMPOS_ID_POSIBLES)
+            price = _buscar_campo(payload, CAMPOS_PRECIO_POSIBLES)
+
             if component_id is None or price is None:
                 rechazados += 1
+                motivos_rechazo.append(f"Campos no reconocidos. Payload recibido: {payload}")
                 continue
 
-            price = float(price)
-            if price < 0: 
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                rechazados += 1
+                motivos_rechazo.append(f"Precio no numérico: {price!r}")
+                continue
+
+            if price < 0:  # --- LIMPIEZA: precios inválidos ---
                 rechazados += 1
                 continue
 
-            event_ts = payload.get("timestamp") or payload.get("event_timestamp") or r.get("received_at")
+            event_ts = (
+                payload.get("timestamp") or payload.get("event_timestamp")
+                or payload.get("fecha") or payload.get("date") or r.get("received_at")
+            )
 
+            # --- ENRIQUECIMIENTO / NORMALIZACIÓN ---
             fila = {
                 "component_id": str(component_id),
-                "component_name": payload.get("component_name") or payload.get("nombre") or "desconocido",
+                "component_name": (
+                    payload.get("component_name") or payload.get("nombre")
+                    or payload.get("name") or str(component_id)
+                ),
                 "price": price,
-                "currency": payload.get("currency", "USD"),
+                "currency": payload.get("currency", payload.get("moneda", "USD")),
                 "event_timestamp": event_ts,
                 "received_at": r.get("received_at"),
             }
+            # --- DEDUPLICACIÓN: llave del evento ---
             raw_key = f"{fila['component_id']}|{fila['event_timestamp']}|{fila['price']}"
             fila["event_key"] = hashlib.md5(raw_key.encode()).hexdigest()
             filas.append(fila)
 
-        except Exception:
+        except Exception as e:
             rechazados += 1
+            motivos_rechazo.append(f"Error inesperado: {e}")
             continue
+
+    # Log de diagnóstico: si TODO se rechazó, mostramos por qué (para detectar
+    # rápido si Duoc usa nombres de campo que aún no reconocemos)
+    if rechazados > 0 and len(filas) == 0:
+        print(f"[DIAGNÓSTICO] Se rechazaron {rechazados} eventos. Primeros motivos:")
+        for m in motivos_rechazo[:3]:
+            print(f"   - {m}")
 
     if not filas:
         return pd.DataFrame(), rechazados, 0

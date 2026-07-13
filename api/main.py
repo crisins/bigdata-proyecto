@@ -14,6 +14,8 @@ Diseño (justificación para el informe):
   - Control de errores: si el payload no cumple el esquema mínimo, se
     guarda igual en una carpeta de "rechazados" con el motivo.
   - Acepta tanto un solo evento como una LISTA de eventos.
+  - Incluye un endpoint de diagnóstico GET /api/subasta/debug para ver
+    exactamente qué payload crudo está mandando la plataforma externa.
 """
 import json
 import os
@@ -29,7 +31,7 @@ from pydantic import BaseModel, ValidationError
 app = FastAPI(
     title="API Ingesta Streaming - Big Data (Subasta de Componentes)",
     description="Recibe eventos POST de la plataforma Duoc, los deja en Bronze y los carga a Gold (Neon).",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -37,6 +39,11 @@ BRONZE_STREAMING = BASE_DIR / "data_lake" / "bronze" / "streaming"
 REJECTED_DIR = BASE_DIR / "data_lake" / "bronze" / "streaming_rechazados"
 BRONZE_STREAMING.mkdir(parents=True, exist_ok=True)
 REJECTED_DIR.mkdir(parents=True, exist_ok=True)
+
+# Buffer en memoria con los últimos payloads crudos recibidos, SOLO para
+# diagnóstico (ver /api/subasta/debug). No es parte del data lake real.
+_ULTIMOS_RAW: list = []
+_MAX_DEBUG = 30
 
 # Reutilizamos la lógica de limpieza/carga ya probada en transform/transform_streaming.py
 # en vez de duplicarla -> un solo lugar con la verdad sobre cómo se limpia un evento.
@@ -77,6 +84,18 @@ def _partition_path(base: Path) -> Path:
 def health():
     """Health check simple (Render lo usa para saber si el servicio está vivo)."""
     return {"status": "ok", "service": "ingesta-streaming-bigdata"}
+
+
+@app.get("/api/subasta/debug")
+def debug_ultimos_eventos():
+    """
+    ENDPOINT TEMPORAL DE DIAGNÓSTICO.
+    Muestra los últimos payloads CRUDOS tal cual llegaron desde Duoc,
+    sin ningún procesamiento. Sirve para confirmar qué nombres de campo
+    usa realmente la plataforma (component_id, price, etc. o distintos).
+    Ábrelo directo en el navegador: https://tu-url.onrender.com/api/subasta/debug
+    """
+    return {"cantidad_en_buffer": len(_ULTIMOS_RAW), "eventos_crudos": _ULTIMOS_RAW}
 
 
 def _procesar_y_cargar_a_gold(registros_bronze: list):
@@ -123,6 +142,11 @@ async def recibir_evento(request: Request, background_tasks: BackgroundTasks):
     except Exception as e:
         _guardar_rechazado(event_id, received_at, {}, f"JSON inválido: {e}")
         return JSONResponse(status_code=400, content={"status": "error", "detail": "JSON inválido"})
+
+    # Guardamos SIEMPRE el payload crudo en el buffer de diagnóstico,
+    # sin importar si luego se valida bien o mal.
+    _ULTIMOS_RAW.append({"received_at": received_at, "raw_body": raw_body})
+    del _ULTIMOS_RAW[:-_MAX_DEBUG]
 
     if isinstance(raw_body, list):
         eventos = raw_body
