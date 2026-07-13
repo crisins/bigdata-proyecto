@@ -1,4 +1,25 @@
+"""
+API de ingesta streaming - Proyecto Big Data
+=============================================
+Expone un endpoint POST público que la plataforma de Duoc
+(bdrealtimeescuelait.duoc.cl) invoca cada vez que hay una fluctuación
+de precio en la subasta de componentes electrónicos.
 
+Diseño (justificación para el informe):
+  - El endpoint NO transforma ni valida en profundidad: solo valida el
+    esquema mínimo, guarda el evento crudo en la capa Bronze (archivo)
+    y responde rápido (200 OK). Esto evita bloquear al emisor y separa
+    responsabilidades (ingesta vs. transformación), patrón estándar en
+    arquitecturas de streaming.
+  - La limpieza, deduplicación y carga al modelo final ocurre después,
+    en un proceso aparte (transform/transform_streaming.py), que se
+    puede ejecutar cada cierto tiempo (ej. cada 5 minutos) o bajo demanda.
+  - Control de errores: si el payload no cumple el esquema mínimo, se
+    guarda igual en una carpeta de "rechazados" con el motivo, en vez
+    de perder el dato (trazabilidad completa).
+  - Acepta tanto un solo evento como una LISTA de eventos, ya que no
+    controlamos el formato exacto que envía la plataforma externa.
+"""
 import json
 import os
 import uuid
@@ -23,11 +44,16 @@ REJECTED_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class EventoSubastaFlexible(BaseModel):
+    """
+    Esquema mínimo esperado. Se deja flexible a propósito porque no
+    controlamos el formato exacto que envía la plataforma de Duoc.
+    """
     class Config:
-        extra = "allow"
+        extra = "allow"  # acepta campos adicionales sin fallar
 
 
 def _partition_path(base: Path) -> Path:
+    """Particiona los archivos por fecha/hora, como en un data lake real."""
     now = datetime.now(timezone.utc)
     path = base / f"dt={now:%Y-%m-%d}" / f"hour={now:%H}"
     path.mkdir(parents=True, exist_ok=True)
@@ -36,36 +62,66 @@ def _partition_path(base: Path) -> Path:
 
 @app.get("/")
 def health():
+    """Health check simple (Render lo usa para saber si el servicio está vivo)."""
     return {"status": "ok", "service": "ingesta-streaming-bigdata"}
 
 
 @app.post("/api/subasta/ingesta")
 async def recibir_evento(request: Request):
+    """
+    Endpoint que se registra en https://bdrealtimeescuelait.duoc.cl
+    (campo "URL", con nota "El endpoint debe ser un POST").
+
+    Acepta dos formas de payload:
+      - Un solo evento:  {"component_id": "...", "price": 123, ...}
+      - Una lista de eventos: [{"component_id": "...", ...}, {...}, ...]
+    """
     event_id = str(uuid.uuid4())
     received_at = datetime.now(timezone.utc).isoformat()
 
+    # Control de errores: si el body no es JSON válido, no se cae la API
     try:
         raw_body = await request.json()
     except Exception as e:
         _guardar_rechazado(event_id, received_at, {}, f"JSON inválido: {e}")
         return JSONResponse(status_code=400, content={"status": "error", "detail": "JSON inválido"})
 
-    try:
-        EventoSubastaFlexible(**raw_body)
-        registro = {
-            "event_id": event_id,
-            "received_at": received_at,
-            "payload": raw_body,
-        }
-        path = _partition_path(BRONZE_STREAMING)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(registro, ensure_ascii=False) + "\n")
+    # Normalizamos siempre a una lista de eventos, sea cual sea la forma que llegó
+    if isinstance(raw_body, list):
+        eventos = raw_body
+    elif isinstance(raw_body, dict):
+        eventos = [raw_body]
+    else:
+        _guardar_rechazado(event_id, received_at, raw_body, f"Tipo de payload no soportado: {type(raw_body).__name__}")
+        return JSONResponse(status_code=400, content={"status": "error", "detail": "Payload debe ser un objeto o una lista de objetos"})
 
-        return {"status": "ok", "event_id": event_id}
+    procesados = []
+    for item in eventos:
+        item_event_id = str(uuid.uuid4())
 
-    except ValidationError as e:
-        _guardar_rechazado(event_id, received_at, raw_body, str(e))
-        return {"status": "recibido_con_advertencia", "event_id": event_id}
+        if not isinstance(item, dict):
+            _guardar_rechazado(item_event_id, received_at, item, f"Elemento no es un objeto JSON: {type(item).__name__}")
+            continue
+
+        try:
+            EventoSubastaFlexible(**item)
+            registro = {
+                "event_id": item_event_id,
+                "received_at": received_at,
+                "payload": item,
+            }
+            path = _partition_path(BRONZE_STREAMING)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(registro, ensure_ascii=False) + "\n")
+            procesados.append(item_event_id)
+
+        except ValidationError as e:
+            _guardar_rechazado(item_event_id, received_at, item, str(e))
+            # Igual lo registramos como recibido: el dato queda trazado, no se pierde,
+            # pero no bloqueamos al emisor por un problema nuestro de esquema.
+            procesados.append(item_event_id)
+
+    return {"status": "ok", "batch_id": event_id, "eventos_procesados": len(procesados), "event_ids": procesados}
 
 
 def _guardar_rechazado(event_id, received_at, payload, motivo):
